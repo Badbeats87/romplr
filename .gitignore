@@ -1,0 +1,33 @@
+# Build artifacts
+*.o
+*.d
+*.elf
+*.img
+*.lst
+*.map
+*.hex
+*.bin
+
+# Large files
+*.zip
+*.wav
+*.sf2
+
+# Instrument samples (760MB — too large for git)
+platforms/baremetal/sdcard-files/instruments/
+
+# Linux backup image
+rompler-linux-backup.img
+
+# Circle SDK (symlinked)
+circle-stdlib
+
+# IDE / OS
+.DS_Store
+.vscode/
+*.swp
+*~
+
+# Tools
+tools/boot-timer.sh
+tools/boot-timer.py

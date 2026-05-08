@@ -1,0 +1,85 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                    REORGANIZED MINI-JV880 STRUCTURE                        ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+mini-jv880-restructured/
+│
+├─ 📄 Makefile                      ← Central build orchestration
+├─ 📄 README.md                     ← Project overview
+├─ 📄 STATUS.md                     ← Current status & blockers
+├─ 📄 MIGRATION.md                  ← This reorganization guide
+│
+├─ 📁 synth/                        SHARED SYNTH ENGINE (ready for dedup)
+│  ├─ 📁 shared/                    ← Common DSP components (future)
+│  ├─ 📁 baremetal/                 ← All synth source code currently here
+│  │  ├─ rompler.{c,h}              
+│  │  ├─ voice.{c,h,o}
+│  │  ├─ effects.{c,h,o}
+│  │  ├─ envelope.{c,h,o}
+│  │  ├─ lfo.{c,h,o}
+│  │  ├─ tone.{c,h,o}
+│  │  ├─ tvf.{c,h,o}
+│  │  ├─ tva.{c,h,o}
+│  │  ├─ wg.{c,h,o}
+│  │  ├─ sample_bank.{c,h,o}
+│  │  └─ midi.{c,h,o}
+│  └─ 📁 linux/                     ← Future: Linux synth sources
+│
+├─ 📁 platforms/                    BUILD TARGETS
+│  ├─ 📁 baremetal/                 Circle bare-metal on Raspberry Pi
+│  │  ├─ Makefile
+│  │  ├─ kernel.{h,cpp}
+│  │  ├─ deploy-to-sd.sh
+│  │  └─ 📁 sdcard-files/           ← Sample data for SD card
+│  │
+│  └─ 📁 linux/                     Buildroot Linux on Raspberry Pi
+│     ├─ Makefile
+│     ├─ main.c
+│     ├─ deploy_sf2.sh
+│     └─ [buildroot config]
+│
+├─ 📁 bootloaders/                 WiFi & Ethernet bootloaders
+│  ├─ wifi-bootloader → (symlink)
+│  └─ eth-bootloader → (symlink)
+│
+├─ 📁 scripts/                      BUILD & UTILITY SCRIPTS
+│  ├─ build.sh
+│  ├─ build_pi4.sh
+│  ├─ build_sd.sh
+│  ├─ submod.sh
+│  └─ USBID.sh
+│
+├─ 📁 docs/                         DOCUMENTATION
+│  └─ BUILD.md                      ← Detailed build instructions
+│
+├─ 📁 third_party/                  EXTERNAL DEPENDENCIES
+│  └─ README.md                     ← Git submodule info
+│     (circle-stdlib, CMSIS_5, buildroot)
+│
+├─ 📁 archive/                      LEGACY CODE
+│  ├─ README.md
+│  ├─ original-jv880-emulator/ → (symlink to src/)
+│  └─ test-kernel/ → (symlink)
+│
+└─ 📁 builds/                       BUILD ARTIFACTS (reserved)
+
+═══════════════════════════════════════════════════════════════════════════
+
+KEY IMPROVEMENTS:
+✓ Scripts consolidated to scripts/
+✓ Build targets separated into platforms/
+✓ Synth engine centralized (ready for deduplication)
+✓ Legacy code archived
+✓ Top-level Makefile for unified build commands
+✓ Clear documentation (MIGRATION.md, docs/BUILD.md)
+✓ Submodules documented in third_party/
+
+QUICK COMMANDS:
+$ make help               # Show all build targets
+$ make setup              # Initialize git submodules
+$ make build-baremetal   # Build Circle bare-metal kernel
+$ make build-linux       # Build Linux distribution
+$ make deploy-baremetal  # TFTP upload to Pi
+$ make deploy-samples    # Copy audio samples to SD
+
+═══════════════════════════════════════════════════════════════════════════

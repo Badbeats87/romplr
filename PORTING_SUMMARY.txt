@@ -1,0 +1,112 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    PORTING LINUX ROMPLER TO BARE-METAL
+                              Quick Summary
+═══════════════════════════════════════════════════════════════════════════════
+
+THE PROBLEM
+───────────
+The Linux version (rompler-linux/main.c) is complete and working.
+The bare-metal version (rompler/kernel.cpp) is stuck debugging USB MIDI.
+
+THE SOLUTION
+────────────
+Extract the synth engine from Linux and port it to bare-metal Circle.
+
+WHY THIS WORKS
+──────────────
+✓ Linux main.c is 1732 lines:
+  - ~1200 LOC pure DSP (portable C)
+  - ~500 LOC OS-specific (replaceable with Circle APIs)
+
+✓ Circle has everything we need:
+  - PWM audio output (already working at 48kHz)
+  - USB MIDI support (being debugged)
+  - FAT32 filesystem access (via FATFS)
+  - Spinlocks for synchronization
+
+THE WORK (6-9 hours)
+────────────────────
+Phase 1: Extract synth core               1-2h  ████████░░░░░░░░░░
+Phase 2: Audio I/O (ALSA → Circle PWM)    1h    ████░░░░░░░░░░░░░░
+Phase 3: File I/O (stdio → FATFS)         1h    ████░░░░░░░░░░░░░░
+Phase 4: MIDI input (pthread → USB)       2-3h  ████████░░░░░░░░░░ *BLOCKED*
+Phase 5: Build integration                30m   ██░░░░░░░░░░░░░░░░
+Phase 6: Testing & debugging              1-2h  ████████░░░░░░░░░░
+────────────────────────────────────────────────────────────────────
+TOTAL                                     6-9h  ████████████░░░░░░
+
+*BLOCKED on USB MIDI fix (see STATUS.md for hypotheses)
+
+KEY APIS TO REPLACE
+────────────────────
+Audio:         snd_pcm_open/writei    →  CPWMSoundBaseDevice::GetChunk()
+MIDI:          pthread_create/read    →  CUSBMIDIDevice callback + queue
+File I/O:      fopen/fread/closedir   →  FATFS f_open/f_read/f_readdir
+Synchronization: pthread_mutex_*      →  CSpinLock::Acquire/Release()
+
+DOCUMENTATION
+──────────────
+Read these in order:
+
+1. docs/PORTING_GUIDE.md
+   → Overview of 5 phases, risks, timeline
+   → Start here to understand the big picture
+
+2. docs/LINUX_TO_BAREMETAL_MAPPING.md
+   → Side-by-side code comparisons
+   → Reference while coding
+
+3. docs/PORTING_CHECKLIST.md
+   → Step-by-step tasks with code snippets
+   → Follow this while implementing
+
+QUICK START (Omit MIDI for now)
+────────────────────────────────
+To get audio working without MIDI:
+
+1. Extract synth core to synth/shared/
+   └─ Modular: voice.c, envelope.c, filter.c, lfo.c, effects.c
+
+2. Implement CSynthSound in kernel.cpp
+   └─ Replace CTestSound, implement GetChunk() callback
+
+3. Load samples from SD at boot
+   └─ Use FATFS to read WAV files, populate sample banks
+
+4. Build and test
+   └─ Should hear synth output on audio out
+
+5. Wait for USB MIDI fix, then add MIDI input
+
+RISKS & MITIGATIONS
+────────────────────
+Risk 1: USB MIDI still broken
+└─ Mitigation: Debug first (see STATUS.md). Get audio working first.
+
+Risk 2: Audio dropout (GetChunk() too slow)
+└─ Mitigation: Keep GetChunk() <10ms. Profile with Circle tools.
+
+Risk 3: Sample rate mismatch (44.1kHz → 48kHz)
+└─ Mitigation: Resample or regenerate sample data.
+
+Risk 4: Memory too tight
+└─ Mitigation: Pi 4 has 8GB. Current needs: ~32MB samples + ~5MB synth = OK.
+
+SUCCESS CRITERIA
+─────────────────
+✓ Synth renders at 48kHz stereo via PWM
+✓ Samples load from SD card at boot
+✓ MIDI input works (after USB fix)
+✓ Chorus + reverb effects audible
+✓ No crashes in 1+ hour runtime
+
+NEXT ACTIONS
+─────────────
+Immediate:
+1. Read docs/PORTING_GUIDE.md (30 min)
+2. Start Phase 1: Extract synth core (1-2 hours)
+3. Start Phase 2: Implement GetChunk() (1 hour)
+
+Then wait for USB fix, then proceed with MIDI.
+
+═══════════════════════════════════════════════════════════════════════════════
