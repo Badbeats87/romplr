@@ -5,7 +5,9 @@
 #include "tone.h"
 #include "patch.h"
 
+#ifndef MAX_VOICES
 #define MAX_VOICES  24
+#endif
 
 typedef struct {
     ToneState tones[NUM_TONES]; /* 1 tone per voice for rompler */

@@ -1620,11 +1620,9 @@ int main(int argc, char **argv)
         }
         pthread_mutex_unlock(&vlock);
 
-        /* Count active voices for mix scaling — ramp smoothly to prevent clicks */
-        int active = 0;
-        for (int v = 0; v < NUM_VOICES; v++)
-            if (voices[v].note >= 0) active++;
-        double target_scale = 1.0 / (32768.0 * (active > 2 ? active * 0.5 : 1.0));
+        /* Fixed mix scale — the tanh soft-clipper handles overloads.
+         * No dynamic voice-count scaling (was causing volume fluctuation). */
+        double target_scale = 1.0 / 32768.0;
         double scale_step = (target_scale - prev_scale) / (double)period;
         double cur_scale = prev_scale;
 
@@ -1653,7 +1651,7 @@ int main(int argc, char **argv)
         /* ---- Chorus (triangle LFO, no sin()) ---- */
         if (g_chorus_mix > 0.001) {
             double cmix = g_chorus_mix * 0.5;
-            double cdry = 1.0 - cmix;
+            double cdry = 1.0;  /* dry stays full, chorus added on top */
             for (int i = 0; i < (int)period; i++) {
                 float in = outbuf[i];
                 chorus_buf[chorus_wpos] = in;
@@ -1683,7 +1681,7 @@ int main(int argc, char **argv)
         /* ---- Reverb (Schroeder) ---- */
         if (g_reverb_mix > 0.001) {
             double rmix = g_reverb_mix * 0.5;
-            double rdry = 1.0 - rmix;
+            double rdry = 1.0;  /* dry stays full, reverb added on top */
             for (int i = 0; i < (int)period; i++) {
                 float in = outbuf[i] / 32000.0f;
                 /* 4 parallel comb filters */

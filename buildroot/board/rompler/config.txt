@@ -1,0 +1,23 @@
+# Raspberry Pi 4 firmware configuration for Rompler
+
+# 64-bit kernel
+arm_64bit=1
+kernel=Image
+
+# Use device tree
+dtoverlay=vc4-kms-v3d
+
+# Enable audio (PWM on headphone jack + HDMI)
+dtparam=audio=on
+
+# USB power (no limit for bus-powered MIDI controllers)
+max_usb_current=1
+
+# Disable splash screen for faster boot
+disable_splash=1
+
+# Disable Bluetooth (not needed, saves boot time)
+dtoverlay=disable-bt
+
+# GPU memory (minimal — we don't need graphics)
+gpu_mem=64

@@ -31,6 +31,9 @@ typedef struct {
     uint8_t  finished;      /* 1 if sample reached end (no loop) */
     uint8_t  pad[3];
     const WGParams *params;
+#ifdef STREAM_FROM_SD
+    int      stream_idx;    /* voice index into stream pool, -1 = none */
+#endif
 } WGState;
 
 void    wg_note_on (WGState *w, const WGParams *p, uint8_t note,

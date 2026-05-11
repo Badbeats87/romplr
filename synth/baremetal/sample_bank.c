@@ -218,7 +218,85 @@ static int parse_zone_line(const char *line, SampleBank *sb,
     while (*fn && len < 126) path[len++] = *fn++;
     path[len] = '\0';
 
-    /* Load WAV into pool */
+#ifdef STREAM_FROM_SD
+    /* Streaming mode: parse WAV header for metadata, don't load PCM */
+    {
+        FIL wfp;
+        UINT wbr;
+        if (f_open(&wfp, path, FA_READ) != FR_OK)
+            return -1;
+
+        uint8_t hdr[44];
+        if (f_read(&wfp, hdr, 44, &wbr) != FR_OK || wbr < 44) {
+            f_close(&wfp);
+            return -1;
+        }
+
+        /* Verify RIFF/WAVE */
+        if (hdr[0] != 'R' || hdr[1] != 'I' || hdr[2] != 'F' || hdr[3] != 'F' ||
+            hdr[8] != 'W' || hdr[9] != 'A' || hdr[10] != 'V' || hdr[11] != 'E') {
+            f_close(&wfp);
+            return -1;
+        }
+
+        uint16_t wfmt  = hdr[20] | (hdr[21] << 8);
+        uint16_t wchan = hdr[22] | (hdr[23] << 8);
+        uint16_t wbits = hdr[34] | (hdr[35] << 8);
+        if (wfmt != 1 || wbits != 16) {
+            f_close(&wfp);
+            return -1;
+        }
+
+        /* Find data chunk */
+        uint32_t fmt_sz = hdr[16] | (hdr[17] << 8) | (hdr[18] << 16) | (hdr[19] << 24);
+        uint32_t scan_ofs = 12 + 8 + fmt_sz;
+        f_lseek(&wfp, scan_ofs);
+
+        uint8_t chunk_hdr[8];
+        uint32_t data_size = 0;
+        uint32_t data_ofs = 0;
+        for (int attempt = 0; attempt < 10; attempt++) {
+            if (f_read(&wfp, chunk_hdr, 8, &wbr) != FR_OK || wbr < 8)
+                break;
+            data_size = chunk_hdr[4] | (chunk_hdr[5] << 8) |
+                        (chunk_hdr[6] << 16) | (chunk_hdr[7] << 24);
+            if (chunk_hdr[0] == 'd' && chunk_hdr[1] == 'a' &&
+                chunk_hdr[2] == 't' && chunk_hdr[3] == 'a') {
+                data_ofs = f_tell(&wfp);
+                break;
+            }
+            f_lseek(&wfp, f_tell(&wfp) + data_size);
+            data_size = 0;
+        }
+
+        f_close(&wfp);
+
+        if (data_size == 0) return -1;
+
+        uint32_t bytes_per_sample = (wchan * wbits) / 8;
+        uint32_t total_frames = data_size / bytes_per_sample;
+
+        SampleZone *z = &inst->zones[inst->num_zones];
+        z->pcm        = NULL;
+        z->length     = total_frames;
+        z->low_key    = (uint8_t)vals[0];
+        z->high_key   = (uint8_t)vals[1];
+        z->root_key   = (uint8_t)vals[2];
+        z->loop_start = (uint32_t)vals[3];
+        z->loop_end   = (uint32_t)vals[4];
+        z->fine_tune  = (int8_t)vals[5];
+        z->volume     = (uint8_t)vals[6];
+
+        /* Store streaming metadata */
+        strncpy(z->wav_path, path, sizeof(z->wav_path) - 1);
+        z->wav_path[sizeof(z->wav_path) - 1] = '\0';
+        z->wav_data_offset = data_ofs;
+
+        inst->num_zones++;
+        return 0;
+    }
+#else
+    /* Normal mode: load WAV into pool */
     uint32_t avail = SAMPLE_POOL_SAMPLES - sb->pool_used;
     uint32_t samples = load_wav(path, &g_sample_pool[sb->pool_used], avail);
     if (samples == 0) return -1;
@@ -237,6 +315,7 @@ static int parse_zone_line(const char *line, SampleBank *sb,
     sb->pool_used += samples;
     inst->num_zones++;
     return 0;
+#endif
 }
 
 int sample_bank_load_instrument(SampleBank *sb, const char *dir_path)
@@ -331,8 +410,11 @@ process_line:
 
     int idx = sb->num_instruments;
     /* Memory barrier: ensure all instrument data is visible before
-     * the audio thread sees the incremented count. */
+     * the audio thread sees the incremented count.
+     * Not needed on single-core platforms (Teensy Cortex-M7). */
+#ifndef PLATFORM_SINGLE_CORE
     __sync_synchronize();
+#endif
     sb->num_instruments++;
     return idx;
 }
@@ -349,6 +431,7 @@ void sample_bank_init(SampleBank *sb)
     g_num_dirs = 0;
     g_next_pending = 1;
 
+#ifndef STREAM_FROM_SD
     /* Allocate sample pool from high memory (above 1GB).
      * Default malloc uses low heap (~448MB), too small for all instruments.
      * alloc_high_mem() uses Circle's HEAP_HIGH (1-3GB range, 2GB available). */
@@ -363,6 +446,7 @@ void sample_bank_init(SampleBank *sb)
             return;
         }
     }
+#endif
 
     /* Scan SD:/instruments/ for subdirectories */
     {

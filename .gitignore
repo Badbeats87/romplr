@@ -1,8 +1,10 @@
 # Build artifacts
 *.o
+*.a
 *.d
 *.elf
 *.img
+!releases/*.img
 *.lst
 *.map
 *.hex
@@ -16,18 +18,16 @@
 # Instrument samples (760MB — too large for git)
 platforms/baremetal/sdcard-files/instruments/
 
-# Linux backup image
-rompler-linux-backup.img
+# PlatformIO (Teensy build artifacts)
+.pio/
 
-# Circle SDK (symlinked)
-circle-stdlib
+# Library build artifacts
+libs/fluidsynth/build/
+libs/circle-stdlib/install/
+libs/circle-stdlib/Config.mk
 
 # IDE / OS
 .DS_Store
 .vscode/
 *.swp
 *~
-
-# Tools
-tools/boot-timer.sh
-tools/boot-timer.py

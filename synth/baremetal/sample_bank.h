@@ -18,9 +18,17 @@
  *     ...
  * ═══════════════════════════════════════════════════════════ */
 
+#ifndef MAX_INSTRUMENTS
 #define MAX_INSTRUMENTS     128
+#endif
+
+#ifndef MAX_ZONES
 #define MAX_ZONES           16
+#endif
+
+#ifndef SAMPLE_POOL_SAMPLES
 #define SAMPLE_POOL_SAMPLES (512 * 1024 * 1024)  /* 512M samples = 1GB */
+#endif
 
 /* One key zone within an instrument multisample */
 typedef struct {
@@ -34,6 +42,10 @@ typedef struct {
     uint32_t loop_end;      /* loop end sample (0 = loop to length) */
     int8_t   fine_tune;     /* fine tuning in cents */
     uint8_t  pad[3];
+#ifdef STREAM_FROM_SD
+    char     wav_path[112];      /* full WAV file path for streaming */
+    uint32_t wav_data_offset;    /* byte offset of PCM data in WAV */
+#endif
 } SampleZone;
 
 /* One loaded instrument */

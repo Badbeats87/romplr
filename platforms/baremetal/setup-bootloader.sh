@@ -6,7 +6,7 @@
 set -e
 
 SD="/Volumes/UNTITLED"
-BOOTLOADER="../../circle-stdlib/libs/circle/tools/bootloader/kernel8-rpi4.img"
+BOOTLOADER="../../libs/circle-stdlib/libs/circle/tools/bootloader/kernel8-rpi4.img"
 
 if [ ! -d "$SD" ]; then
     echo "ERROR: SD card not mounted at $SD"

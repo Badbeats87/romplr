@@ -1,5 +1,12 @@
 #include "voice.h"
 #include "../include/types.h"
+#ifdef STREAM_FROM_SD
+#include "stream.h"
+#include "sample_bank.h"
+
+/* External access to sample bank for zone lookup during stream open */
+extern const SampleBank *wg_get_sample_bank(void);
+#endif
 
 void voice_alloc_init(VoiceAllocator *va)
 {
@@ -12,6 +19,9 @@ void voice_alloc_init(VoiceAllocator *va)
             va->voices[v].tones[t].active = false;
             envelope_reset(&va->voices[v].tones[t].tvf.env);
             envelope_reset(&va->voices[v].tones[t].tva.env);
+#ifdef STREAM_FROM_SD
+            va->voices[v].tones[t].wg.stream_idx = -1;
+#endif
         }
     }
     va->voice_clock    = 0;
@@ -82,6 +92,23 @@ void voice_note_on(VoiceAllocator *va, const PatchParams *patch,
     for (int t = 0; t < NUM_TONES; t++) {
         tone_note_on(&voice->tones[t], &patch->tone[t],
                      note, velocity, va->pitch_bend_semi);
+#ifdef STREAM_FROM_SD
+        /* Request SD stream for each active tone's WG (deferred to main loop) */
+        if (voice->tones[t].active && !voice->tones[t].wg.finished) {
+            int stream_slot = v;  /* 1 tone per voice, so voice idx = stream slot */
+            const SampleBank *sb = wg_get_sample_bank();
+            if (sb) {
+                const SampleZone *zone = sample_bank_find_zone(sb,
+                    (int)patch->tone[t].wg.inst_idx, note);
+                if (zone && zone->length > 0) {
+                    stream_request_open(stream_slot, zone->wav_path,
+                                        zone->wav_data_offset, zone->length,
+                                        zone->loop_start);
+                    voice->tones[t].wg.stream_idx = stream_slot;
+                }
+            }
+        }
+#endif
     }
     voice->active    = true;
 }
@@ -183,6 +210,7 @@ void voice_render_sample(VoiceAllocator *va,
 
         if (!any_active) {
             voice->active = false;
+            /* Stream cleanup happens in stream_refill_all() (main loop) */
         }
     }
 

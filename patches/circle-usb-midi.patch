@@ -1,0 +1,180 @@
+--- a/libs/circle/lib/usb/usbmidihost.cpp
++++ b/libs/circle/lib/usb/usbmidihost.cpp
+@@ -81,6 +81,12 @@
+ 	boolean bIsRolandUMOne =    pDeviceDesc->idVendor  == 0x0582
+ 				 && pDeviceDesc->idProduct == 0x012A;
+ 
++	CLogger::Get ()->Write (FromMIDI, LogNotice,
++		"VID=%04X PID=%04X nEP=%u",
++		(unsigned) pDeviceDesc->idVendor,
++		(unsigned) pDeviceDesc->idProduct,
++		GetNumEndpoints ());
++
+ 	// Our strategy for now is simple: we'll take the first MIDI streaming
+ 	// bulk-in endpoint on this interface we can find.  To distinguish
+ 	// between the MIDI streaming bulk-in endpoints we want (which carry
+@@ -124,7 +130,17 @@
+ 					  % CUSBMIDIDevice::EventPacketSize;
+ 
+ 			assert (m_pPacketBuffer == 0);
+-			m_pPacketBuffer = new u8[m_usBufferSize];
++			// Allocate cache-aligned DMA buffer (fix for VL805 xHCI)
++			size_t nAlignedSize = (m_usBufferSize + 63) & ~63u;
++			void *pAligned = 0;
++			// Use aligned allocation: allocate extra, align manually
++			u8 *pRaw = new u8[nAlignedSize + 64];
++			assert (pRaw != 0);
++			pAligned = (void *)(((uintptr) pRaw + 63) & ~(uintptr)63);
++			m_pPacketBuffer = (u8 *) pAligned;
++			CLogger::Get ()->Write (FromMIDI, LogNotice,
++				"DMA buf: raw=%p aligned=%p size=%u",
++				pRaw, pAligned, (unsigned) nAlignedSize);
+ 			assert (m_pPacketBuffer != 0);
+ 		}
+ 		else							// Output EP
+@@ -154,7 +170,23 @@
+ 		CLogger::Get ()->Write (FromMIDI, LogError, "Cannot set interface");
+ 
+ 		return FALSE;
++	}
++
++	// Explicitly send SET_INTERFACE even for alt setting 0
++	// Some devices need this to activate their endpoints
++	if (GetHost ()->ControlMessage (GetEndpoint0 (),
++					REQUEST_OUT | REQUEST_TO_INTERFACE, SET_INTERFACE,
++					0,	// wValue = alt setting 0
++					GetInterfaceNumber (), 0, 0) < 0)
++	{
++		CLogger::Get ()->Write (FromMIDI, LogWarning,
++			"SET_INTERFACE(0) failed (non-fatal)");
+ 	}
++	else
++	{
++		CLogger::Get ()->Write (FromMIDI, LogNotice,
++			"SET_INTERFACE(%u, 0) ok", (unsigned) GetInterfaceNumber ());
++	}
+ 
+ 	// attach interface device
+ 	assert (m_pInterface == 0);
+@@ -162,6 +194,10 @@
+ 	assert (m_pInterface != 0);
+ 	m_pInterface->RegisterSendEventsHandler (SendEventsHandler, this);
+ 
++	CLogger::Get ()->Write (FromMIDI, LogNotice,
++		"bufSz=%u, calling StartRequest(async)",
++		(unsigned) m_usBufferSize);
++
+ 	return StartRequest ();
+ }
+ 
+@@ -205,6 +241,16 @@
+ 	assert (pURB != 0);
+ 	assert (m_pInterface != 0);
+ 
++	static unsigned nCompCount = 0;
++	if (nCompCount < 10)
++	{
++		CLogger::Get ()->Write (FromMIDI, LogNotice,
++			"Completion #%u: status=%d len=%u",
++			nCompCount, (int) pURB->GetStatus (),
++			(unsigned) pURB->GetResultLength ());
++		nCompCount++;
++	}
++
+ 	boolean bRestart = FALSE;
+ 
+ 	if (   pURB->GetStatus () != 0
+
+--- a/libs/circle/lib/usb/xhcidevice.cpp
++++ b/libs/circle/lib/usb/xhcidevice.cpp
+@@ -412,7 +412,51 @@
+ 	{
+ 		m_pMMIO->rt_write64 (0, XHCI_REG_RT_IR_ERDP_LO,   XHCI_TO_DMA (pEventTRB)
+ 								| XHCI_REG_RT_IR_ERDP_LO_EHB);
++	}
++	else
++	{
++		m_pMMIO->rt_write64 (0, XHCI_REG_RT_IR_ERDP_LO,
++				       (  m_pMMIO->rt_read64 (0, XHCI_REG_RT_IR_ERDP_LO)
++				        & XHCI_REG_RT_IR_ERDP__MASK)
++				     | XHCI_REG_RT_IR_ERDP_LO_EHB);
++	}
++}
++
++void CXHCIDevice::PollEvents (void)
++{
++	// Identical to InterruptHandler but called from main loop
++	// Must only be used after DisableInterrupts() to avoid races
++
++	// Acknowledge any pending interrupt status
++	u32 nStatus = m_pMMIO->op_read32 (XHCI_REG_OP_USBSTS);
++	if (nStatus & XHCI_REG_OP_USBSTS_EINT)
++	{
++		m_pMMIO->op_write32 (XHCI_REG_OP_USBSTS, nStatus | XHCI_REG_OP_USBSTS_EINT);
++		m_pMMIO->rt_write32 (0, XHCI_REG_RT_IR_IMAN,
++			m_pMMIO->rt_read32 (0, XHCI_REG_RT_IR_IMAN) | XHCI_REG_RT_IR_IMAN_IP);
++	}
++
++	if (nStatus & XHCI_REG_OP_USBSTS_HCH)
++	{
++		return;
++	}
++
++	TXHCITRB *pEventTRB = 0;
++	TXHCITRB *pNextEventTRB;
++	assert (m_pEventManager != 0);
++
++	unsigned nTries = XHCI_CONFIG_MAX_EVENTS_PER_INTR;
++	while (   nTries-- != 0
++	       && (pNextEventTRB = m_pEventManager->HandleEvents ()) != 0)
++	{
++		pEventTRB = pNextEventTRB;
+ 	}
++
++	if (pEventTRB != 0)
++	{
++		m_pMMIO->rt_write64 (0, XHCI_REG_RT_IR_ERDP_LO,   XHCI_TO_DMA (pEventTRB)
++							| XHCI_REG_RT_IR_ERDP_LO_EHB);
++	}
+ 	else
+ 	{
+ 		m_pMMIO->rt_write64 (0, XHCI_REG_RT_IR_ERDP_LO,
+@@ -422,6 +466,22 @@
+ 	}
+ }
+ 
++void CXHCIDevice::DisableXHCIInterrupts (void)
++{
++	// Clear INTE bit — stop xHCI from generating PCIe interrupts
++	m_pMMIO->op_write32 (XHCI_REG_OP_USBCMD,
++		m_pMMIO->op_read32 (XHCI_REG_OP_USBCMD) & ~XHCI_REG_OP_USBCMD_INTE);
++
++	// Disconnect IRQ handler
++	if (m_bInterruptConnected)
++	{
++		m_pInterruptSystem->DisconnectIRQ (ARM_IRQ_XHCI);
++		m_bInterruptConnected = FALSE;
++	}
++
++	CLogger::Get ()->Write ("xhci", LogNotice, "Interrupts disabled, polling mode");
++}
++
+ void CXHCIDevice::InterruptStub (void *pParam)
+ {
+ 	CXHCIDevice *pThis = (CXHCIDevice *) pParam;
+
+--- a/libs/circle/include/circle/usb/xhcidevice.h
++++ b/libs/circle/include/circle/usb/xhcidevice.h
+@@ -65,6 +65,12 @@
+ 	void DumpStatus (void);
+ #endif
+ 
++	// Manual event polling (for debugging xHCI transfer completions)
++	void PollEvents (void);
++
++	// Disable xHCI interrupts (switch to polling-only mode)
++	void DisableXHCIInterrupts (void);
++
+ private:
+ 	void InterruptHandler (void);
+ 	static void InterruptStub (void *pParam);

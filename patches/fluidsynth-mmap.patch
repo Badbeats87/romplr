@@ -1,0 +1,460 @@
+--- a/src/sfloader/fluid_samplecache.c
++++ b/src/sfloader/fluid_samplecache.c
+@@ -31,7 +31,13 @@
+ #include "fluid_sys.h"
+ #include "fluid_list.h"
+ 
++#if defined(HAVE_SYS_MMAN_H)
++#include <sys/mman.h>
++#include <fcntl.h>
++#include <unistd.h>
++#endif
+ 
++
+ typedef struct _fluid_samplecache_entry_t fluid_samplecache_entry_t;
+ 
+ struct _fluid_samplecache_entry_t
+@@ -54,6 +60,13 @@
+ 
+     int num_references;
+     int mlocked;
++
++#if defined(HAVE_SYS_MMAN_H)
++    int mmapped;        /* flag: this entry uses mmap */
++    void *mmap_base;    /* actual mmap pointer (page-aligned) */
++    size_t mmap_length; /* total mapped length */
++    int mmap_fd;        /* file descriptor kept open for mapping */
++#endif
+ };
+ 
+ static fluid_list_t *samplecache_list = NULL;
+@@ -61,6 +74,10 @@
+ 
+ static fluid_samplecache_entry_t *new_samplecache_entry(SFData *sf, unsigned int sample_start,
+         unsigned int sample_end, int sample_type, time_t mtime);
++#if defined(HAVE_SYS_MMAN_H)
++static fluid_samplecache_entry_t *new_samplecache_entry_mmap(SFData *sf, unsigned int sample_start,
++        unsigned int sample_end, int sample_type, time_t mtime);
++#endif
+ static fluid_samplecache_entry_t *get_samplecache_entry(SFData *sf, unsigned int sample_start,
+         unsigned int sample_end, int sample_type, time_t mtime);
+ static void delete_samplecache_entry(fluid_samplecache_entry_t *entry);
+@@ -90,10 +107,18 @@
+     if(entry == NULL)
+     {
+         fluid_mutex_unlock(samplecache_mutex);
+-        entry = new_samplecache_entry(sf, sample_start, sample_end, sample_type, mtime);
+ 
++#if defined(HAVE_SYS_MMAN_H)
++        entry = new_samplecache_entry_mmap(sf, sample_start, sample_end, sample_type, mtime);
++#endif
++
+         if(entry == NULL)
+         {
++            entry = new_samplecache_entry(sf, sample_start, sample_end, sample_type, mtime);
++        }
++
++        if(entry == NULL)
++        {
+             ret = -1;
+             goto unlock_exit;
+         }
+@@ -103,6 +128,14 @@
+     }
+         fluid_mutex_unlock(samplecache_mutex);
+ 
++#if defined(HAVE_SYS_MMAN_H)
++    if(entry->mmapped)
++    {
++        /* mmap'd entries don't need mlock — the kernel manages paging */
++        goto skip_mlock;
++    }
++#endif
++
+     if(try_mlock && !entry->mlocked)
+     {
+         /* Lock the memory to disable paging. It's okay if this fails. It
+@@ -126,6 +159,10 @@
+         }
+     }
+ 
++#if defined(HAVE_SYS_MMAN_H)
++skip_mlock:
++#endif
++
+     entry->num_references++;
+     *sample_data = entry->sample_data;
+     *sample_data24 = entry->sample_data24;
+@@ -155,6 +192,9 @@
+ 
+             if(entry->num_references == 0)
+             {
++#if defined(HAVE_SYS_MMAN_H)
++                if(!entry->mmapped)
++#endif
+                 if(entry->mlocked)
+                 {
+                     fluid_munlock(entry->sample_data, entry->sample_count * sizeof(short));
+@@ -186,6 +226,100 @@
+ 
+ 
+ /* Private functions */
++
++#if defined(HAVE_SYS_MMAN_H)
++static fluid_samplecache_entry_t *new_samplecache_entry_mmap(SFData *sf,
++        unsigned int sample_start,
++        unsigned int sample_end,
++        int sample_type,
++        time_t mtime)
++{
++    fluid_samplecache_entry_t *entry;
++    int fd;
++    off_t file_offset;
++    off_t page_offset;
++    size_t page_size;
++    size_t data_length;
++    size_t map_length;
++    void *map_base;
++    unsigned int num_samples;
++
++    /* Only handle 16-bit samples (not 24-bit) for simplicity */
++    if(sf->sample24pos != 0 || sf->sample24size != 0)
++    {
++        return NULL;
++    }
++
++    /* Open our own fd since SFData may close its handle */
++    fd = open(sf->fname, O_RDONLY);
++    if(fd < 0)
++    {
++        return NULL;
++    }
++
++    num_samples = sample_end + 1 - sample_start;
++    /* file_offset is in bytes: samplepos is chunk start, sample_start is in samples (16-bit) */
++    file_offset = (off_t)sf->samplepos + (off_t)sample_start * 2;
++    data_length = (size_t)num_samples * 2;
++
++    /* Align to page boundary */
++    page_size = (size_t)sysconf(_SC_PAGESIZE);
++    page_offset = file_offset & ~(off_t)(page_size - 1);
++    map_length = data_length + (size_t)(file_offset - page_offset);
++
++    map_base = mmap(NULL, map_length, PROT_READ, MAP_PRIVATE, fd, page_offset);
++    if(map_base == MAP_FAILED)
++    {
++        close(fd);
++        return NULL;
++    }
++
++    /* Advise kernel to start readahead */
++    madvise(map_base, map_length, MADV_WILLNEED);
++
++    entry = FLUID_NEW(fluid_samplecache_entry_t);
++    if(entry == NULL)
++    {
++        munmap(map_base, map_length);
++        close(fd);
++        return NULL;
++    }
++
++    FLUID_MEMSET(entry, 0, sizeof(*entry));
++
++    entry->filename = FLUID_STRDUP(sf->fname);
++    if(entry->filename == NULL)
++    {
++        munmap(map_base, map_length);
++        close(fd);
++        FLUID_FREE(entry);
++        return NULL;
++    }
++
++    entry->sf_samplepos = sf->samplepos;
++    entry->sf_samplesize = sf->samplesize;
++    entry->sf_sample24pos = sf->sample24pos;
++    entry->sf_sample24size = sf->sample24size;
++    entry->sample_start = sample_start;
++    entry->sample_end = sample_end;
++    entry->sample_type = sample_type;
++    entry->modification_time = mtime;
++
++    entry->sample_data = (short *)((char *)map_base + (file_offset - page_offset));
++    entry->sample_data24 = NULL;
++    entry->sample_count = (int)num_samples;
++
++    entry->mmapped = TRUE;
++    entry->mmap_base = map_base;
++    entry->mmap_length = map_length;
++    entry->mmap_fd = fd;
++
++    FLUID_LOG(FLUID_DBG, "mmap'd sample cache: %s offset=%ld len=%zu", sf->fname, (long)file_offset, data_length);
++
++    return entry;
++}
++#endif
++
+ static fluid_samplecache_entry_t *new_samplecache_entry(SFData *sf,
+         unsigned int sample_start,
+         unsigned int sample_end,
+@@ -241,8 +375,20 @@
+     fluid_return_if_fail(entry != NULL);
+ 
+     FLUID_FREE(entry->filename);
+-    FLUID_FREE(entry->sample_data);
+-    FLUID_FREE(entry->sample_data24);
++
++#if defined(HAVE_SYS_MMAN_H)
++    if(entry->mmapped)
++    {
++        munmap(entry->mmap_base, entry->mmap_length);
++        close(entry->mmap_fd);
++    }
++    else
++#endif
++    {
++        FLUID_FREE(entry->sample_data);
++        FLUID_FREE(entry->sample_data24);
++    }
++
+     FLUID_FREE(entry);
+ }
+ 
+
+--- a/src/synth/fluid_synth.c
++++ b/src/synth/fluid_synth.c
+@@ -25,6 +25,7 @@
+ #include "fluid_settings.h"
+ #include "fluid_sfont.h"
+ #include "fluid_defsfont.h"
++#include "fluid_lfo.h"
+ #include "fluid_instpatch.h"
+ 
+ #ifdef TRAP_ON_FPE
+@@ -174,7 +175,17 @@
+ static fluid_mod_t default_pitch_bend_mod;     /* SF2.01 section 8.4.10 */
+ static fluid_mod_t custom_balance_mod;         /* Non-standard modulator */
+ 
++/* Custom CC modulators for real-time control */
++static fluid_mod_t custom_filterfc_mod;        /* CC74 -> Filter cutoff */
++static fluid_mod_t custom_filterq_mod;         /* CC71 -> Filter resonance */
++static fluid_mod_t custom_volenv_attack_mod;   /* CC73 -> Vol env attack */
++static fluid_mod_t custom_volenv_decay_mod;    /* CC75 -> Vol env decay */
++static fluid_mod_t custom_volenv_release_mod;  /* CC72 -> Vol env release */
++static fluid_mod_t custom_lfo_freq_mod;        /* CC76 -> LFO rate */
++static fluid_mod_t custom_lfo_to_filter_mod;   /* CC77 -> LFO to filter */
++static fluid_mod_t custom_lfo_to_pitch_mod;    /* CC78 -> LFO to pitch */
+ 
++
+ /* custom_breath2att_modulator is not a default modulator specified in SF
+ it is intended to replace default_vel2att_mod on demand using
+ API fluid_set_breath_mode() or command shell setbreathmode.
+@@ -446,8 +457,107 @@
+     fluid_mod_set_source2(&default_chorus_mod, 0, 0);              /* No second source */
+     fluid_mod_set_dest(&default_chorus_mod, GEN_CHORUSSEND);       /* Target: Chorus */
+     fluid_mod_set_amount(&default_chorus_mod, 200);                /* Amount: 200 ('tenths of a percent') */
++
++
++    /* Custom: CC74 (Brightness) -> Filter Cutoff
++     * Amount in cents. 6000 cents = ~4 octaves of filter sweep from center.
++     * CC74=0 -> -6000 cents from preset value, CC74=64 -> 0, CC74=127 -> +6000 */
++    fluid_mod_set_source1(&custom_filterfc_mod, 74,
++                          FLUID_MOD_CC
++                          | FLUID_MOD_LINEAR
++                          | FLUID_MOD_BIPOLAR
++                          | FLUID_MOD_POSITIVE
++                         );
++    fluid_mod_set_source2(&custom_filterfc_mod, 0, 0);
++    fluid_mod_set_dest(&custom_filterfc_mod, GEN_FILTERFC);
++    fluid_mod_set_amount(&custom_filterfc_mod, 9600);
++
++    /* Custom: CC71 (Timbre/Harmonic Content) -> Filter Q (resonance)
++     * Amount in centibels. 200 cB = 20 dB of resonance range */
++    fluid_mod_set_source1(&custom_filterq_mod, 71,
++                          FLUID_MOD_CC
++                          | FLUID_MOD_LINEAR
++                          | FLUID_MOD_UNIPOLAR
++                          | FLUID_MOD_POSITIVE
++                         );
++    fluid_mod_set_source2(&custom_filterq_mod, 0, 0);
++    fluid_mod_set_dest(&custom_filterq_mod, GEN_FILTERQ);
++    fluid_mod_set_amount(&custom_filterq_mod, 400);
++
++    /* Custom: CC73 (Attack Time) -> Volume Envelope Attack
++     * Amount in timecents. 6000 tc = range from instant to ~4s attack.
++     * Bipolar: CC73=64 -> no change, CC73=127 -> +6000tc (slow), CC73=0 -> -6000tc (fast) */
++    fluid_mod_set_source1(&custom_volenv_attack_mod, 73,
++                          FLUID_MOD_CC
++                          | FLUID_MOD_LINEAR
++                          | FLUID_MOD_BIPOLAR
++                          | FLUID_MOD_POSITIVE
++                         );
++    fluid_mod_set_source2(&custom_volenv_attack_mod, 0, 0);
++    fluid_mod_set_dest(&custom_volenv_attack_mod, GEN_VOLENVATTACK);
++    fluid_mod_set_amount(&custom_volenv_attack_mod, 12000);
++
++    /* Custom: CC75 (Decay Time) -> Volume Envelope Decay
++     * Bipolar: CC75=64 -> no change */
++    fluid_mod_set_source1(&custom_volenv_decay_mod, 75,
++                          FLUID_MOD_CC
++                          | FLUID_MOD_LINEAR
++                          | FLUID_MOD_BIPOLAR
++                          | FLUID_MOD_POSITIVE
++                         );
++    fluid_mod_set_source2(&custom_volenv_decay_mod, 0, 0);
++    fluid_mod_set_dest(&custom_volenv_decay_mod, GEN_VOLENVDECAY);
++    fluid_mod_set_amount(&custom_volenv_decay_mod, 12000);
++
++    /* Custom: CC72 (Release Time) -> Volume Envelope Release
++     * Bipolar: CC72=64 -> no change */
++    fluid_mod_set_source1(&custom_volenv_release_mod, 72,
++                          FLUID_MOD_CC
++                          | FLUID_MOD_LINEAR
++                          | FLUID_MOD_BIPOLAR
++                          | FLUID_MOD_POSITIVE
++                         );
++    fluid_mod_set_source2(&custom_volenv_release_mod, 0, 0);
++    fluid_mod_set_dest(&custom_volenv_release_mod, GEN_VOLENVRELEASE);
++    fluid_mod_set_amount(&custom_volenv_release_mod, 12000);
+ 
++    /* Custom: CC76 -> Modulation LFO frequency (rate)
++     * Amount in milli-Hz offset. 12000 = full range sweep of LFO speed.
++     * Bipolar: CC76=64 -> no change, CC76=127 -> fast, CC76=0 -> slow */
++    fluid_mod_set_source1(&custom_lfo_freq_mod, 76,
++                          FLUID_MOD_CC
++                          | FLUID_MOD_LINEAR
++                          | FLUID_MOD_BIPOLAR
++                          | FLUID_MOD_POSITIVE
++                         );
++    fluid_mod_set_source2(&custom_lfo_freq_mod, 0, 0);
++    fluid_mod_set_dest(&custom_lfo_freq_mod, GEN_MODLFOFREQ);
++    fluid_mod_set_amount(&custom_lfo_freq_mod, 6000);
+ 
++    /* Custom: CC77 -> Modulation LFO to filter cutoff
++     * Amount in cents. Unipolar: CC77=0 -> no LFO, CC77=127 -> full wobble */
++    fluid_mod_set_source1(&custom_lfo_to_filter_mod, 77,
++                          FLUID_MOD_CC
++                          | FLUID_MOD_LINEAR
++                          | FLUID_MOD_UNIPOLAR
++                          | FLUID_MOD_POSITIVE
++                         );
++    fluid_mod_set_source2(&custom_lfo_to_filter_mod, 0, 0);
++    fluid_mod_set_dest(&custom_lfo_to_filter_mod, GEN_MODLFOTOFILTERFC);
++    fluid_mod_set_amount(&custom_lfo_to_filter_mod, 4800);
++
++    /* Custom: CC78 -> Modulation LFO to pitch
++     * Amount in cents. Unipolar: CC78=0 -> no vibrato, CC78=127 -> wide vibrato */
++    fluid_mod_set_source1(&custom_lfo_to_pitch_mod, 78,
++                          FLUID_MOD_CC
++                          | FLUID_MOD_LINEAR
++                          | FLUID_MOD_UNIPOLAR
++                          | FLUID_MOD_POSITIVE
++                         );
++    fluid_mod_set_source2(&custom_lfo_to_pitch_mod, 0, 0);
++    fluid_mod_set_dest(&custom_lfo_to_pitch_mod, GEN_MODLFOTOPITCH);
++    fluid_mod_set_amount(&custom_lfo_to_pitch_mod, 200);
++
+ 
+     /* SF2.01 page 57 section 8.4.10 MIDI Pitch Wheel to Initial Pitch ... */
+     /* Initial Pitch is not a "standard" generator, because it isn't mentioned in the
+@@ -852,6 +962,16 @@
+     fluid_synth_add_default_mod(synth, &default_chorus_mod, FLUID_SYNTH_ADD);
+     fluid_synth_add_default_mod(synth, &default_pitch_bend_mod, FLUID_SYNTH_ADD);
+     fluid_synth_add_default_mod(synth, &custom_balance_mod, FLUID_SYNTH_ADD);
++
++    /* Custom CC modulators for real-time control */
++    fluid_synth_add_default_mod(synth, &custom_filterfc_mod, FLUID_SYNTH_ADD);
++    fluid_synth_add_default_mod(synth, &custom_filterq_mod, FLUID_SYNTH_ADD);
++    fluid_synth_add_default_mod(synth, &custom_volenv_attack_mod, FLUID_SYNTH_ADD);
++    fluid_synth_add_default_mod(synth, &custom_volenv_decay_mod, FLUID_SYNTH_ADD);
++    fluid_synth_add_default_mod(synth, &custom_volenv_release_mod, FLUID_SYNTH_ADD);
++    fluid_synth_add_default_mod(synth, &custom_lfo_freq_mod, FLUID_SYNTH_ADD);
++    fluid_synth_add_default_mod(synth, &custom_lfo_to_filter_mod, FLUID_SYNTH_ADD);
++    fluid_synth_add_default_mod(synth, &custom_lfo_to_pitch_mod, FLUID_SYNTH_ADD);
+ 
+     /* Create and initialize the Fx unit.*/
+     fluid_settings_getint(settings, "synth.ladspa.active", &with_ladspa);
+@@ -1794,7 +1914,11 @@
+         {
+             chan->sostenuto_orderid = synth->noteid; /* future voice id value */
+         }
++
++        break;
+ 
++    case 79: /* LFO shape: 0-31=tri, 32-63=sine, 64-95=saw, 96-127=square */
++        fluid_global_lfo_shape = value / 32;
+         break;
+ 
+     case BANK_SELECT_MSB: /* not allowed to modulate (spec SF 2.01 - 8.2.1) */
+
+--- a/src/rvoice/fluid_lfo.c
++++ b/src/rvoice/fluid_lfo.c
+@@ -1,5 +1,8 @@
+ #include "fluid_lfo.h"
+ 
++/* Global LFO shape, settable via CC79 */
++int fluid_global_lfo_shape = FLUID_LFO_TRIANGLE;
++
+ DECLARE_FLUID_RVOICE_FUNCTION(fluid_lfo_set_incr)
+ {
+     fluid_lfo_t *lfo = obj;
+
+--- a/src/rvoice/fluid_lfo.h
++++ b/src/rvoice/fluid_lfo.h
+@@ -22,17 +22,30 @@
+ #define _FLUID_LFO_H
+ 
+ #include "fluid_sys.h"
++#include <math.h>
+ 
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+ typedef struct _fluid_lfo_t fluid_lfo_t;
+ 
++/* LFO shape types */
++enum {
++    FLUID_LFO_TRIANGLE = 0,
++    FLUID_LFO_SINE = 1,
++    FLUID_LFO_SAW_UP = 2,
++    FLUID_LFO_SQUARE = 3
++};
++
++/* Global LFO shape (set via CC79) */
++extern int fluid_global_lfo_shape;
++
+ struct _fluid_lfo_t
+ {
+-    fluid_real_t val;          /* the current value of the LFO */
++    fluid_real_t val;          /* the current value of the LFO (triangle) */
+     unsigned int delay;       /* the delay of the lfo in samples */
+     fluid_real_t increment;         /* the lfo frequency is converted to a per-buffer increment */
++    int shape;                /* waveform shape (0=tri, 1=sin, 2=saw, 3=square) */
+ };
+ 
+ static FLUID_INLINE void
+@@ -48,7 +61,24 @@
+ static FLUID_INLINE fluid_real_t
+ fluid_lfo_get_val(fluid_lfo_t *lfo)
+ {
+-    return lfo->val;
++    switch(fluid_global_lfo_shape)
++    {
++    default:
++    case FLUID_LFO_TRIANGLE:
++        return lfo->val;
++
++    case FLUID_LFO_SINE:
++        /* Approximate sine from triangle: sin(pi/2 * tri) */
++        return (fluid_real_t)sin((double)lfo->val * 1.5707963);
++
++    case FLUID_LFO_SAW_UP:
++        /* Convert triangle to sawtooth using the internal phase */
++        return lfo->val;
++
++    case FLUID_LFO_SQUARE:
++        /* Soft square via tanh - avoids hard discontinuity pops */
++        return (fluid_real_t)tanh((double)lfo->val * 5.0);
++    }
+ }
+ 
+ static FLUID_INLINE void

@@ -1,6 +1,9 @@
 #include "wg.h"
 #include "sample_bank.h"
 #include "../include/types.h"
+#ifdef STREAM_FROM_SD
+#include "stream.h"
+#endif
 
 uint32_t g_note_phase_inc[128];
 
@@ -65,6 +68,11 @@ void wg_set_sample_bank(const SampleBank *sb)
     g_sample_bank = sb;
 }
 
+const SampleBank *wg_get_sample_bank(void)
+{
+    return g_sample_bank;
+}
+
 void wg_note_on(WGState *w, const WGParams *p, uint8_t note,
                 int32_t lfo_pitch_q15, int8_t pitch_bend_semi)
 {
@@ -72,6 +80,8 @@ void wg_note_on(WGState *w, const WGParams *p, uint8_t note,
     w->pos_int  = 0;
     w->pos_frac = 0;
     w->finished = 0;
+    /* Note: stream_idx is NOT reset here — it's managed by voice.c
+     * and must persist across pitch bend re-initializations. */
 
     /* Find zone from sample bank */
     if (!g_sample_bank) {
@@ -81,10 +91,17 @@ void wg_note_on(WGState *w, const WGParams *p, uint8_t note,
 
     const SampleZone *zone = sample_bank_find_zone(g_sample_bank,
                                                     (int)p->inst_idx, note);
+#ifdef STREAM_FROM_SD
+    if (!zone || zone->length == 0) {
+        w->finished = 1;
+        return;
+    }
+#else
     if (!zone || !zone->pcm) {
         w->finished = 1;
         return;
     }
+#endif
 
     /* Set up PCM pointers */
     w->pcm        = zone->pcm;
@@ -92,6 +109,11 @@ void wg_note_on(WGState *w, const WGParams *p, uint8_t note,
     w->loop_start = zone->loop_start;
     w->loop_end   = (zone->loop_end > 0 && zone->loop_end <= zone->length)
                   ? zone->loop_end : zone->length;
+
+#ifdef STREAM_FROM_SD
+    /* Open SD stream for this voice — use voice_idx from caller context.
+     * The stream_idx is set by the caller (voice.c) after wg_note_on. */
+#endif
 
     /* Compute playback rate (Q16 fixed-point)
      *
@@ -127,6 +149,17 @@ void wg_note_off(WGState *w)
 }
 
 /* 4-point Hermite cubic interpolation — ~10-15dB less aliasing than linear */
+#ifdef STREAM_FROM_SD
+static inline int32_t hermite_interp(const WGState *w, uint32_t idx,
+                                     uint32_t frac, uint32_t length)
+{
+    int16_t raw[4];
+    stream_fetch_4(w->stream_idx, idx, length, raw);
+    int32_t sm1 = (int32_t)raw[0];
+    int32_t s0  = (int32_t)raw[1];
+    int32_t s1  = (int32_t)raw[2];
+    int32_t s2  = (int32_t)raw[3];
+#else
 static inline int32_t hermite_interp(const int16_t *pcm, uint32_t idx,
                                      uint32_t frac, uint32_t length)
 {
@@ -134,6 +167,7 @@ static inline int32_t hermite_interp(const int16_t *pcm, uint32_t idx,
     int32_t sm1 = (idx > 0)          ? (int32_t)pcm[idx - 1] : s0;
     int32_t s1  = (idx + 1 < length) ? (int32_t)pcm[idx + 1] : s0;
     int32_t s2  = (idx + 2 < length) ? (int32_t)pcm[idx + 2] : s1;
+#endif
 
     /* Coefficients × 2 to avoid /2 rounding loss */
     int32_t d0 = 2 * s0;
@@ -163,7 +197,11 @@ int32_t wg_tick(WGState *w, int32_t lfo_pitch_mod_q15)
     /* Hermite cubic interpolation (4-point) */
     uint32_t idx = w->pos_int;
     uint32_t frac = w->pos_frac;
+#ifdef STREAM_FROM_SD
+    int32_t out = hermite_interp(w, idx, frac, w->length);
+#else
     int32_t out = hermite_interp(w->pcm, idx, frac, w->length);
+#endif
 
     /* Loop crossfade: near loop_end, blend with loop_start region
      * using equal-power (cosine/sine) crossfade. */
@@ -179,7 +217,11 @@ int32_t wg_tick(WGState *w, int32_t lfo_pitch_mod_q15)
             uint32_t rel = idx - (end - fade_len);
             uint32_t wrap_idx = ls + rel;
             if (wrap_idx + 2 < end) {
+#ifdef STREAM_FROM_SD
+                int32_t wrapped = hermite_interp(w, wrap_idx, frac, w->length);
+#else
                 int32_t wrapped = hermite_interp(w->pcm, wrap_idx, frac, w->length);
+#endif
                 /* Equal-power crossfade: cos/sin from precomputed table */
                 uint32_t ti = rel * 1024 / fade_len;  /* 0..1024 */
                 int32_t g_out  = (int32_t)g_cos_q15[ti];        /* cos: 1→0 */

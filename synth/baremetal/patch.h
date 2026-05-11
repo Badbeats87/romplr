@@ -22,7 +22,9 @@
 #define TVF_MODE_HPF        2
 #define TVF_MODE_PKG        3   /* peaking/notch */
 
+#ifndef NUM_PATCHES
 #define NUM_PATCHES         128  /* max instruments loadable */
+#endif
 #ifndef NUM_TONES
 #define NUM_TONES           1   /* single tone per voice for rompler */
 #endif

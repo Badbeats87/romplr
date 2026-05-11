@@ -2,7 +2,7 @@
 # Makefile — Minimal rompler kernel (no WiFi)
 #
 
-CIRCLE_STDLIB_DIR ?= ../../circle-stdlib
+CIRCLE_STDLIB_DIR ?= ../../libs/circle-stdlib
 SYNTH_DIR = ../../synth/baremetal
 
 -include $(CIRCLE_STDLIB_DIR)/Config.mk

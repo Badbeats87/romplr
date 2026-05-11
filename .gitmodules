@@ -1,0 +1,6 @@
+[submodule "libs/fluidsynth"]
+	path = libs/fluidsynth
+	url = https://github.com/FluidSynth/fluidsynth.git
+[submodule "libs/circle-stdlib"]
+	path = libs/circle-stdlib
+	url = https://github.com/smuehlst/circle-stdlib.git
