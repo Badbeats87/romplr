@@ -1,97 +1,78 @@
-# Mini JV-880 v2 — Project Status
+# Mini JV-880 — Project Status
 
-*Last updated: 2026-05-04*
+*Last updated: 2026-08-10*
 
 ## Overview
 
-Bare-metal rompler synthesizer for Raspberry Pi 4 8GB, built on the Circle framework (Step 46). Receives MIDI via USB, plays WAV samples from SD card through PWM audio output. The project has two main components: the original JV-880 emulator (`src/`) and a new custom rompler engine (`rompler/`).
+Rompler synthesizer for Raspberry Pi 4 8GB. The **Linux path is the primary focus** — bare-metal is archived as experimental. See `docs/status-by-platform.md` for the full platform truth table.
 
-## What Works
+## Decision: Linux over Bare-Metal (2026-08-10)
 
-- **WiFi TFTP bootloader** — Power cycle Pi, wait ~19s, upload kernel via TFTP to 192.168.0.92. Chainboots automatically.
-- **PWM audio output** — 48kHz stereo via DMA-driven PWM. Verified working (440Hz test tone, square wave from MIDI trigger).
-- **Synth engine (code complete)** — 24-voice rompler with SVF filter, amp envelope, pan, LFO, EQ/chorus/reverb effects. Reads WAV samples + instrument.cfg from SD card. All DSP ported from jd800-circle.
-- **HDMI console output** — Logger output to screen, used for diagnostics.
-- **USB device enumeration** — M-Audio Axiom 49 (VID 0x0763, PID 0x202d) detected and configured correctly. MIDI Streaming interface found, Bulk IN endpoint 0x81 configured.
+The original motivation for bare-metal was faster boot time. The Linux FluidSynth version achieves ~12s boot-to-sound with mmap-patched sample loading, making the bare-metal approach unnecessary. Linux also provides SSH, WiFi, easier debugging, and a proven synth engine (FluidSynth).
 
-## What Doesn't Work (Blocker)
+## Primary Targets
 
-### USB MIDI data reception
+### linux-fluidsynth (working, needs reproducibility)
 
-The Axiom 49 enumerates, the Bulk IN endpoint is configured in the xHCI controller, and an async transfer is submitted — but **no MIDI data is ever received**. Transfer completion events never arrive from the VL805 xHCI controller. This blocks all playback.
+- **Status**: Working from backup image (`rompler-linux-backup.img`, 4.3 GB)
+- **Boot time**: ~12s power-on to playable sound
+- **Engine**: FluidSynth with mmap patch for instant sample loading
+- **SoundFonts**: Roland Fantom A/B SF2 files (2.9 GB + 4 GB) on SD partition 3
+- **MIDI**: USB MIDI via ALSA, M-Audio Axiom 49
+- **Audio**: ALSA PCM output
+- **Custom CCs**: CC74=cutoff, CC71=reso, CC73/75/72=attack/decay/release
+- **Helper**: `midi_bankfix` for FluidSynth bank selection
+- **Scripts**: `platforms/linux-fluidsynth/deploy.sh`, `fluidsynth-start.sh`
+- **Patches**: `patches/fluidsynth-mmap.patch` (mmap + CC modulators + LFO shapes)
 
-**Confirmed working on Mac** — the same keyboard (same PID 0x202d) sends MIDI data correctly on macOS via CoreMIDI. The keyboard hardware is fine.
+**Problem**: Not reproducible from source. The backup image is the only tested artifact. No Buildroot package definition exists.
 
-**Hypotheses eliminated:**
-- CScheduler interference — removed entirely
-- WiFi/network code — removed entirely
-- EMMC/FatFS init order or interference — tried all permutations, removed entirely
-- 32MB sample pool allocation — skipped
-- Kernel object size / BSS overflow — verified well within bounds
-- PWM DMA audio interference — disabled entirely
-- Extra CKernel members — stripped to match miniorgan sample exactly
-- Async vs sync USB read — both fail identically
-- SET_INTERFACE alternate settings — alt 0 and 1 both accepted, no data either way
-- Keyboard firmware — factory reset, long power discharge, different USB port
+**Next steps**:
+1. Make the image reproducible (Buildroot package or documented manual build)
+2. Document exact image contents and startup sequence
+3. Remove hardcoded WiFi credentials from scripts
 
-**Remaining hypotheses (untested):**
-1. Explicit SET_INTERFACE(intf, 0) needed even for alt setting 0 — *built but not yet uploaded*
-2. Force endpoint to Interrupt type instead of Bulk — VL805 may mishandle Full Speed Bulk endpoints
-3. Dump xHCI device context to verify endpoint is actually in "Running" state
-4. Use Pi 4's internal USB controller (`USE_XHCI_INTERNAL`) instead of VL805
-5. JTAG debugging to inspect xHCI registers directly
+### linux-rompler (reference implementation)
 
-## Current State of Code
+- **Source**: `platforms/linux-rompler/main.c` (1732 lines)
+- **Status**: Binary exists (`rompler-new`). Not recently tested.
+- **Role**: Reference synth engine. Was the basis for the bare-metal port. Could become an alternative to FluidSynth if custom DSP is needed.
 
-### `rompler/` — STRIPPED DOWN for debugging
+## Archived / Experimental
 
-The kernel is currently stripped to a minimal test matching Circle's miniorgan sample:
-- **kernel.h/cpp** — CTestSound (square wave), no EMMC/FatFS/Serial/Rompler members
-- **Makefile** — SYNTH_OBJS empty, only builds main.o kernel.o chainboot.o
-- **synth/** — Full rompler engine source exists but is not compiled
+### baremetal-rompler (experimental)
 
-### Circle library modifications (`circle-stdlib/libs/circle/`)
+- **Source**: `platforms/baremetal/` + `synth/baremetal/`
+- **Status**: Code complete but **never fully verified on hardware**. USB MIDI, HEAP_HIGH allocation, and full instrument loading are unproven on the current build.
+- **Why archived**: Linux FluidSynth achieves comparable boot time (~12s) with less complexity. Bare-metal adds maintenance burden (Circle framework, custom synth engine, no networking/debugging).
 
-- **lib/usb/usbmidihost.cpp** — Added diagnostic logging (VID/PID, endpoint info, completion events) and explicit SET_INTERFACE(0) call
-- **lib/usb/xhciendpoint.cpp** — Added transfer event logging
-- **tools/bootloader/vectors64.s** — Chainboot multicore fix (ARM_ALLOW_MULTI_CORE assert removed)
+### baremetal-minijv880 (archived)
 
-## To Restore Full Rompler
+- **Source**: `archive/original-jv880-emulator/`
+- **Status**: Original JV-880 emulator. Not maintained.
 
-Once USB MIDI is working, restore from git or rebuild:
-1. `kernel.h` — Add back CEMMCDevice, FATFS, CSerialDevice, Rompler members, CSynthSound class
-2. `kernel.cpp` — Add back EMMC init, FatFS mount, rompler_init(), sample loading, serial command parser
-3. `Makefile` — Restore SYNTH_OBJS (rompler.o voice.o tone.o wg.o tvf.o tva.o envelope.o lfo.o effects.o sample_bank.o midi.o)
-4. `usbmidihost.cpp` / `xhciendpoint.cpp` — Remove debug logging
+### teensy-rompler (experimental)
 
-## Directory Layout
-
-```
-mini-jv880-v2/
-  rompler/           <- Custom rompler engine (active development)
-    kernel.h/cpp     <- Currently stripped down for MIDI debugging
-    synth/           <- Full synth engine source (not compiled currently)
-    sdcard-files/    <- Sample data for SD card (instruments/sine/)
-    deploy-to-sd.sh  <- Copy samples to SD card
-  src/               <- Original JV-880 emulator (not actively used)
-  wifi-bootloader/   <- TFTP bootloader kernel
-  test-kernel/       <- WiFi/syslog test kernel
-  circle-stdlib/     <- Circle framework + newlib (Step 46)
-```
-
-## Build & Deploy
-
-```bash
-cd /Users/invision/mini-jv880-v2/rompler
-make clean && make          # Build kernel (~500KB image)
-make deploy                 # TFTP upload to Pi at 192.168.0.92
-./deploy-to-sd.sh           # Copy samples to SD card at /Volumes/BOOT/
-```
+- **Source**: `platforms/teensy/`
+- **Status**: PlatformIO project for Teensy 4.1. Not actively developed.
 
 ## Hardware
 
-- Raspberry Pi 4 Model B 8GB
-- M-Audio Axiom 49 USB MIDI keyboard (2nd gen, PID 0x202d)
-- HDMI display for console output
-- SD card with bootloader + WiFi firmware + instrument samples
-- USB-serial adapter at /dev/cu.usbserial-0001 (115200 baud) — optional
+- Raspberry Pi 4 Model B 8 GB
+- M-Audio Axiom 49 USB MIDI keyboard (VID 0x0763, PID 0x202d)
+- HDMI display for console
+- SD card: boot partition (FAT32) + rootfs + SF2 partition
+- CP2102N USB-serial adapter on `/dev/cu.usbserial-0001` (115200 baud)
+
+## Build
+
+```bash
+# Linux rompler (cross-compile)
+cd platforms/linux-rompler && make
+
+# Restore FluidSynth image to SD
+sudo dd if=rompler-linux-backup.img of=/dev/rdisk4 bs=1m
+
+# Host smoke test (synth engine only)
+make test-host
+```

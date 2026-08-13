@@ -19,7 +19,7 @@ build-baremetal:
 	cd platforms/baremetal && make clean && make
 
 build-linux:
-	cd platforms/linux && make
+	cd platforms/linux-rompler && make
 
 test-host:
 	$(CC) -std=c99 -Wall -Wextra -Isynth/include -Isynth/baremetal \
@@ -43,4 +43,4 @@ deploy-samples:
 
 clean:
 	cd platforms/baremetal && make clean
-	cd platforms/linux && make clean 2>/dev/null || true
+	cd platforms/linux-rompler && make clean 2>/dev/null || true
